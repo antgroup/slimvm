@@ -1522,11 +1522,26 @@ static int vmx_inject_nmi(struct vmx_vcpu *vcpu)
 	return 0;
 }
 
+static void vmx_set_interrupt_window_exiting(bool enable)
+{
+	u32 exec_control = vmcs_read32(CPU_BASED_VM_EXEC_CONTROL);
+
+	if (enable)
+		exec_control |= CPU_BASED_INTR_WINDOW_EXITING;
+	else
+		exec_control &= ~CPU_BASED_INTR_WINDOW_EXITING;
+
+	vmcs_write32(CPU_BASED_VM_EXEC_CONTROL, exec_control);
+}
+
 static void vmx_inject_bounce(struct vmx_vcpu *vcpu)
 {
-	if (!vmx_interrupt_allowed())
+	if (!vmx_interrupt_allowed()) {
+		vmx_set_interrupt_window_exiting(true);
 		return;
+	}
 
+	vmx_set_interrupt_window_exiting(false);
 	slimvm_inject_vector(vcpu, VIRTUAL_EXCEPTION_VECTOR);
 	vcpu->bounce_pending = false;
 }
@@ -2735,6 +2750,12 @@ int vmx_launch(struct vmx_vcpu *vcpu, struct slimvm_config *conf)
 			break;
 		case EXIT_REASON_XSETBV:
 			handle_xsetbv(vcpu);
+			break;
+		case EXIT_REASON_INTERRUPT_WINDOW:
+			if (vcpu->bounce_pending)
+				vmx_inject_bounce(vcpu);
+			else
+				vmx_set_interrupt_window_exiting(false);
 			break;
 
 		/*
