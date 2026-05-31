@@ -64,22 +64,30 @@ void slimvm_inject_vector(struct vmx_vcpu *vcpu, u64 vector)
 int slimvm_signal_handler(struct vmx_vcpu *vcpu)
 {
 	unsigned long flags;
-	sigset_t sigset_bounce;
-	sigemptyset(&sigset_bounce);
-	sigaddset(&sigset_bounce, SIG_BOUNCE);
+	bool had_bounce;
 
-	if (sigequalsets(&current->pending.signal, &sigset_bounce)) {
-		/* consume bounce signal */
-		spin_lock_irqsave(&current->sighand->siglock, flags);
+	/* Consume SIG_BOUNCE whenever it is present, even alongside other signals. */
+	spin_lock_irqsave(&current->sighand->siglock, flags);
+	had_bounce = sigismember(&current->pending.signal, SIG_BOUNCE);
+	if (had_bounce) {
 		sigdelset(&current->pending.signal, SIG_BOUNCE);
 		recalc_sigpending();
-		spin_unlock_irqrestore(&current->sighand->siglock, flags);
-		vcpu->bounce_pending = true;
-		return 0;
 	}
+	spin_unlock_irqrestore(&current->sighand->siglock, flags);
 
-	/* unexpected signal, return to hr3 */
-	return -1;
+	if (had_bounce)
+		vcpu->bounce_pending = true;
+
+	/*
+	 * If a deliverable (unblocked) non-bounce signal remains pending, return
+	 * to HR3 so the runtime can service it; the bounce is remembered via
+	 * bounce_pending and injected on the next guest entry, so it is never
+	 * lost. Otherwise stay in guest mode and let the run loop inject it.
+	 */
+	if (signal_pending(current))
+		return -1;
+
+	return 0;
 }
 
 static inline int slimvm_get_si_code(unsigned long condition)
