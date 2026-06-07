@@ -199,12 +199,25 @@ static int enter_guestmode_loop(struct vmx_vcpu *vcpu, u32 cached_flags)
 		}
 
 		if (cached_flags & _TIF_SIGPENDING) {
+			/*
+			 * A signal forces us to leave the run ioctl before the
+			 * vcpu has produced a real VM exit, so vcpu->status may
+			 * still hold a stale value (e.g. 0 from init). Report a
+			 * valid "interrupted" status to HR3 so bluepillHandler
+			 * treats it as a benign signal exit instead of an
+			 * invalid status. Follows Linux KVM, whose
+			 * kvm_handle_signal_exit() sets run->exit_reason =
+			 * KVM_EXIT_INTR for any pending signal (fatal or not).
+			 * See https://elixir.bootlin.com/linux/v6.1/source/include/linux/kvm_host.h#L2255
+			 */
 			if (__fatal_signal_pending(current)) {
+				vcpu->status = SLIMVM_RET_INTR;
 				local_irq_disable();
 				return -1;
 			}
 
 			if (slimvm_signal_handler(vcpu)) {
+				vcpu->status = SLIMVM_RET_INTR;
 				local_irq_disable();
 				return -1;
 			}
@@ -2720,11 +2733,16 @@ int vmx_launch(struct vmx_vcpu *vcpu, struct slimvm_config *conf)
 			break;
 		case EXIT_REASON_EPT_VIOLATION:
 			r = vmx_handle_ept_violation(vcpu);
-			if (r < 0)
+			if (r < 0) {
 				done = SLIMVM_RET_INTERNAL_ERROR;
-			else
-				done = 0;
-			vcpu->status = done;
+				vcpu->status = done;
+			}
+			/*
+			 * On success, leave vcpu->status untouched. Follows
+			 * Linux KVM, where handle_ept_violation() resumes the
+			 * guest (returns 1) without touching run->exit_reason.
+			 * See https://elixir.bootlin.com/linux/v6.1/source/arch/x86/kvm/vmx/vmx.c#L5667
+			 */
 			break;
 		case EXIT_REASON_EPT_MISCONFIG:
 			vmx_handle_ept_misconfig(vcpu);
