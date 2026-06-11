@@ -61,6 +61,8 @@ enum {
 #define EPTE_PAGE_DIRECTORY     1 /* 2M */
 #define EPTE_PAGE_PDPE          2 /* 1G */
 
+#define EPT_PDPE_SIZE	(1UL << 30)
+
 #define ept_align_down(x, a) \
 	((unsigned long)(x) & ~(((unsigned long)(a)) - 1))
 #define ept_align_up(x, a) \
@@ -108,6 +110,11 @@ static inline epte_t epte_flags(epte_t epte)
 static inline int epte_present(epte_t epte)
 {
 	return (epte & __EPTE_FULL);
+}
+
+static inline int is_epte_huge(epte_t epte)
+{
+	return (epte & __EPTE_SZ);
 }
 
 static inline epte_t ept_flags(int write, bool pfnmap, unsigned long mtype)
@@ -206,6 +213,11 @@ static int ept_lookup_gpa(struct instance *instp, gpa_t gpa, int level,
 				   __EPTE_FULL;
 		}
 
+		if (is_epte_huge(dir[idx]) && i == EPTE_PAGE_DIRECTORY) {
+			level = EPTE_PAGE_DIRECTORY;
+			break;
+		}
+
 		dir = (epte_t *) epte_page_vaddr(dir[idx]);
 	}
 
@@ -247,6 +259,11 @@ static void vmx_free_ept_pmd_range(epte_t *pmd)
 		pte = (epte_t *)epte_page_vaddr(pmd[i]);
 		if (!epte_present(pmd[i]))
 			continue;
+
+		if (is_epte_huge(pmd[i])) {
+			WRITE_ONCE(pmd[i], __EPTE_NONE);
+			continue;
+		}
 
 		vmx_free_ept_pte_range(pte);
 		WRITE_ONCE(pmd[i], __EPTE_NONE);
@@ -312,8 +329,10 @@ static int ept_clear_dir(epte_t *epte)
 	}
 
 	WRITE_ONCE(*epte, __EPTE_NONE);
-	page = pfn_to_page(epte_value >> PAGE_SHIFT);
-	put_page(page);
+	if (!is_epte_huge(epte_value)) {
+		page = pfn_to_page(epte_value >> PAGE_SHIFT);
+		put_page(page);
+	}
 
 	return 1;
 }
@@ -373,6 +392,41 @@ static int mmu_notifier_retry(struct instance *instp, unsigned long seq)
 	return 0;
 }
 
+/*
+ * gpa_to_hva() is piecewise-linear per mem_region, so HVA is contiguous only
+ * within one region. The 2M-aligned base and the next 2M boundary span exactly
+ * 2M only if the range stays inside a single region; otherwise a 2M entry is
+ * unsafe and we fall back to 4K.
+ */
+static int check_hugepage_consistency(struct instance *instp, gpa_t gpa)
+{
+	hva_t s, e, size;
+
+	s = gpa_to_hva(instp, gpa & EPTE_HPAGE_MASK);
+	e = gpa_to_hva(instp, (gpa + SLIMVM_HPAGE_2M_SIZE) & EPTE_HPAGE_MASK);
+	size = e - s;
+
+	if (s == ADDR_INVAL || e == ADDR_INVAL)
+		return 0;
+
+	return (size == SLIMVM_HPAGE_2M_SIZE);
+}
+
+static int mapping_level(struct instance *instp, gpa_t gpa)
+{
+	epte_t *epte;
+	int ret;
+
+	if (!check_hugepage_consistency(instp, gpa))
+		return EPTE_PAGE_TABLE;
+
+	ret = ept_lookup_gpa(instp, gpa, EPTE_PAGE_DIRECTORY, 0, &epte);
+	if (!ret && epte_present(*epte) && !is_epte_huge(*epte))
+		return EPTE_PAGE_TABLE;
+
+	return EPTE_PAGE_DIRECTORY;
+}
+
 static void ept_dump_mm_stat(struct instance *instp)
 {
 	slimvm_info("         Counts Total (KB)\n");
@@ -387,7 +441,10 @@ static void ept_trace_mm_stat_map(struct instance *instp, epte_t epte)
 	if ((epte == 0) || (epte & __EPTE_PFNMAP))
 		return;
 
-	instp->ept_4k_pages++;
+	if (is_epte_huge(epte))
+		instp->ept_2m_pages++;
+	else
+		instp->ept_4k_pages++;
 }
 
 static void ept_trace_mm_stat_unmap(struct instance *instp, epte_t epte)
@@ -395,7 +452,50 @@ static void ept_trace_mm_stat_unmap(struct instance *instp, epte_t epte)
 	if ((epte == 0) || (epte & __EPTE_PFNMAP))
 		return;
 
-	instp->ept_4k_pages--;
+	if (is_epte_huge(epte))
+		instp->ept_2m_pages--;
+	else
+		instp->ept_4k_pages--;
+}
+
+static inline int __is_trans_compoundmap(struct page *page)
+{
+	struct page *hpage;
+
+	if (!PageTransCompound(page))
+		return 0;
+
+	/* Anonymous transparent hugepage */
+	if (PageAnon(page))
+		return atomic_read(&page->_mapcount) < 0;
+
+	hpage = compound_head(page);
+	/* File transparent hugepage */
+	return atomic_read(&page->_mapcount) ==
+	       atomic_read(compound_mapcount_ptr(hpage));
+}
+
+static inline int __is_trans_hugepage(struct page *page)
+{
+#ifdef CONFIG_TRANSPARENT_HUGEPAGE
+	if (!PageCompound(page))
+		return 0;
+
+	page = compound_head(page);
+	return page[1].compound_dtor == TRANSHUGE_PAGE_DTOR;
+#else
+	/* TRANSHUGE_PAGE_DTOR is compiled out without THP; fall back to 4K. */
+	return 0;
+#endif
+}
+
+/* Refer kvm_is_transparent_hugepage() in Linux Kernel. */
+static inline int slimvm_is_transparent_hugepage(struct page *page)
+{
+	if (!__is_trans_compoundmap(page))
+		return 0;
+
+	return __is_trans_hugepage(compound_head(page));
 }
 
 static int ept_pin_user_page(int write, hva_t hva,
@@ -470,6 +570,16 @@ static int ept_set_epte(struct instance *instp, int make_write,
 	if (mmu_notifier_retry(instp, seq))
 		goto ept_unlock;
 
+	if (!pfnmap && slimvm_is_transparent_hugepage(page) &&
+	    mapping_level(instp, gpa) == EPTE_PAGE_DIRECTORY) {
+		struct page *hpage = compound_head(page);
+
+		WARN_ON((pfn & HPAGE_PFN_MASK) != page_to_pfn(hpage));
+		pfn = page_to_pfn(hpage);
+		flags |= __EPTE_SZ;
+		level = EPTE_PAGE_DIRECTORY;
+	}
+
 	ret = ept_lookup_gpa(instp, gpa, level, 1, &epte);
 	if (ret)
 		goto ept_unlock;
@@ -477,6 +587,9 @@ static int ept_set_epte(struct instance *instp, int make_write,
 	addr = (pfn << PAGE_SHIFT) | flags;
 
 	if (epte_present(*epte)) {
+		if (is_epte_huge(*epte) && level != EPTE_PAGE_DIRECTORY)
+			goto ept_unlock;
+
 		WARN_ON((epte_addr(*epte) >> PAGE_SHIFT) != pfn);
 	} else {
 		ept_trace_mm_stat_map(instp, addr);
@@ -636,11 +749,32 @@ static void ept_clear_page_table(struct instance *instp,
 	while (s < e) {
 		ret = ept_lookup_hva(instp, mm, s, EPTE_PAGE_TABLE, 0, &epte);
 		if (!ret) {
+			if (is_epte_huge(*epte)) {
+				hva_t down, up;
+
+				/*
+				 * A 2M entry cannot be partially unmapped. If
+				 * the range does not fully cover the 2M block,
+				 * drop the whole entry so the next access
+				 * re-faults, then skip to the next 2M block.
+				 */
+				down = ept_align_down(s, SLIMVM_HPAGE_2M_SIZE);
+				up = ept_align_up(s, SLIMVM_HPAGE_2M_SIZE);
+
+				if (s > down || e < up) {
+					ept_trace_mm_stat_unmap(instp, *epte);
+					ept_clear_epte(epte);
+				}
+
+				s = down + SLIMVM_HPAGE_2M_SIZE;
+			} else {
+				s += PAGE_SIZE;
+				ept_trace_mm_stat_unmap(instp, *epte);
+				ept_clear_epte(epte);
+			}
+		} else {
 			s += PAGE_SIZE;
-			ept_trace_mm_stat_unmap(instp, *epte);
-			ept_clear_epte(epte);
-		} else
-			s += PAGE_SIZE;
+		}
 	}
 }
 
@@ -664,6 +798,9 @@ static void ept_clear_page_directory(struct instance *instp,
 		ret = ept_lookup_hva(instp, mm, s,
 				EPTE_PAGE_DIRECTORY, 0, &epte);
 		if (!ret) {
+			if (is_epte_huge(*epte))
+				ept_trace_mm_stat_unmap(instp, *epte);
+
 			ept_clear_dir(epte);
 		}
 
