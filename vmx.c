@@ -1559,15 +1559,6 @@ static void vmx_inject_bounce(struct vmx_vcpu *vcpu)
 	vcpu->bounce_pending = false;
 }
 
-static int vmx_inject_oom(struct vmx_vcpu *vcpu, int vector)
-{
-	if (!vmx_interrupt_allowed())
-		return -EINVAL;
-
-	slimvm_inject_vector(vcpu, vector);
-	return 0;
-}
-
 /**
  * vmx_setup_registers - setup general purpose registers
  */
@@ -2186,17 +2177,7 @@ static int vmx_handle_ept_violation(struct vmx_vcpu *vcpu)
 	case -ERESTARTSYS:
 		break;
 	case -ENOMEM:
-		/*
-		 * Try to inject exception to sentry, if failed, fall back to
-		 * trigger host OOM killer from HR3.
-		 */
-		if (vmx_inject_oom(vcpu, T0_OOM_VECTOR) == 0) {
-			/* Return success, if inject oom exception success. */
-			ret = 0;
-		} else {
-			/* Return ENOMEM to HR3, and set vcpu->status. */
-			vcpu->status = SLIMVM_RET_EPT_VIOLATION;
-		}
+		/* Return -ENOMEM to HR3. */
 		break;
 	default:
 		instp = vcpu->instance;
