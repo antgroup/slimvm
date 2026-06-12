@@ -28,7 +28,6 @@
 #define XM_VECTOR 19
 #define VE_VECTOR 20
 #define VE_VECTOR_KERN 21
-#define T0_OOM_VECTOR 32 /* inject OOM event via interrupt */
 
 #define SIG_BOUNCE SIGCHLD
 /*
