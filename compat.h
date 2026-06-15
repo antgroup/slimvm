@@ -11,6 +11,11 @@
 
 #include <asm/desc.h>
 
+/* Hygon vendor id (added upstream in 4.20); fall back for older trees. */
+#ifndef X86_VENDOR_HYGON
+#define X86_VENDOR_HYGON 9
+#endif
+
 DECLARE_PER_CPU(struct desc_ptr, host_gdt);
 
 #include <asm/fpu/api.h>
@@ -21,6 +26,38 @@ DECLARE_PER_CPU(struct desc_ptr, host_gdt);
 
 #include <linux/sched/mm.h> /* mmdrop() */
 #include <linux/mm.h>
+
+/*
+ * guest_enter_irqoff() / guest_exit_irqoff() are not exported to modules on
+ * recent kernels. Provide local copies (matching the in-tree definitions) so
+ * both engines can account guest cputime. Shared by vmx.c and svm.c.
+ */
+#include <linux/context_tracking.h>
+#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0)
+static __always_inline void slimvm_guest_enter_irqoff(void)
+{
+	instrumentation_begin();
+	vtime_account_guest_enter();
+	instrumentation_end();
+
+	if (!context_tracking_guest_enter()) {
+		instrumentation_begin();
+		rcu_virt_note_context_switch(smp_processor_id());
+		instrumentation_end();
+	}
+}
+
+static __always_inline void slimvm_guest_exit_irqoff(void)
+{
+	context_tracking_guest_exit();
+
+	instrumentation_begin();
+	vtime_account_guest_exit();
+	instrumentation_end();
+}
+#define guest_enter_irqoff slimvm_guest_enter_irqoff
+#define guest_exit_irqoff slimvm_guest_exit_irqoff
+#endif
 
 #if !defined(VMX_EPT_AD_BIT)
 #define VMX_EPT_AD_BIT          (1ull << 21)

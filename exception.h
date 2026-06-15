@@ -7,7 +7,6 @@
 #define _EXCEPTION_H
 
 #include <asm/types.h>
-#include "vmx.h"
 
 #define DE_VECTOR 0
 #define DB_VECTOR 1
@@ -36,11 +35,9 @@
 #define VIRTUAL_EXCEPTION_VECTOR VE_VECTOR
 #define VIRTUAL_EXCEPTION_VECTOR_KERN VE_VECTOR_KERN
 
-int slimvm_signal_handler(struct vmx_vcpu *vcpu);
-int slimvm_exception_handler(u32 intr_info, struct vmx_vcpu *vcpu);
-void slimvm_inject_vector(struct vmx_vcpu *vcpu, u64 vector);
-void slimvm_inject_nmi(struct vmx_vcpu *vcpu);
-
-void exceptions_restore_guest_regs(struct vmx_vcpu *vcpu);
+/*
+ * Per-engine exception entry points are declared in the engine's own header
+ * (vmx.h / svm.h) since they are typed to the concrete vcpu structure.
+ */
 
 #endif /* _EXCEPTION_H */

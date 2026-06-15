@@ -17,6 +17,7 @@
 #include <linux/mmu_notifier.h>
 
 #include "slimvm.h"
+#include "engine.h"
 
 #define INSTANCES_MAX_NUM 8192
 
@@ -32,6 +33,13 @@ struct instance {
 	spinlock_t ept_lock;
 	unsigned long ept_root;
 	unsigned long eptp;
+
+	/*
+	 * npt_mmu_users counts threads currently inside the NPT mmu_notifier
+	 * callbacks (AMD engine only); instance_destroy_npt waits for it to
+	 * drain. Unused by the Intel/EPT engine.
+	 */
+	atomic_t npt_mmu_users;
 
 	/*
 	 * memp is used for setting memory region.
@@ -95,13 +103,17 @@ struct instance {
 
 	spinlock_t vcpu_lock;
 	DECLARE_BITMAP(vcpu_bitmap, VM_MAX_VCPUS);
-	struct vmx_vcpu	*vcpus[VM_MAX_VCPUS];
+	/*
+	 * Opaque vcpu handles. Each engine stores its own concrete vcpu type
+	 * (struct vmx_vcpu * / struct svm_vcpu *) here; void * interconverts
+	 * with both without casts so the engine code is unchanged.
+	 */
+	void *vcpus[VM_MAX_VCPUS];
 };
 
 extern struct instance *instance_create(void);
 extern int instance_release(struct instance *instp);
-extern struct vmx_vcpu *instance_get_vcpu(struct instance *instp,
-					  int vcpu_no);
+extern void *instance_get_vcpu(struct instance *instp, int vcpu_no);
 
 extern int instance_alloc_eptp(struct instance *instp);
 extern int instance_init_ept(struct instance *instp);
@@ -113,6 +125,7 @@ extern int instance_get_vcpu_num(void);
 extern int vcpu_alloc(struct instance *instp,
 		      struct slimvm_config *conf);
 extern void vcpu_release(struct instance *instp, int vcpu_no);
+extern void vcpu_inject_nmi(struct instance *instp, int vcpu_no);
 
 void on_each_vm_instance(void (*action)(struct instance *ins, void *data),
 		void *data);

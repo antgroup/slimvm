@@ -75,7 +75,7 @@ static sys_call_ptr_t slimvm_syscall_table[NR_syscalls] __cacheline_aligned;
 
 static DEFINE_PER_CPU(struct vmcs *, vmxarea);
 DEFINE_PER_CPU(struct desc_ptr, host_gdt);
-DEFINE_PER_CPU(struct vmx_vcpu *, local_vcpu);
+static DEFINE_PER_CPU(struct vmx_vcpu *, vmx_local_vcpu);
 static DEFINE_PER_CPU(struct vmx_vcpu *, vmx_current_vcpu);
 static DEFINE_PER_CPU(int, vmx_enabled);
 
@@ -132,30 +132,7 @@ typedef void (*mem_cgroup_handle_over_high_hack) (void);
 static task_work_run_hack __slimvm_task_work_run;
 static mem_cgroup_handle_over_high_hack __slimvm_mem_cgroup_handle_over_high;
 
-#if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0)
-static __always_inline void guest_enter_irqoff(void)
-{
-	instrumentation_begin();
-	vtime_account_guest_enter();
-	instrumentation_end();
-
-	if (!context_tracking_guest_enter()) {
-		instrumentation_begin();
-		rcu_virt_note_context_switch(smp_processor_id());
-		instrumentation_end();
-	}
-}
-
-static __always_inline void guest_exit_irqoff(void)
-{
-	context_tracking_guest_exit();
-
-	instrumentation_begin();
-	/* Flush the guest cputime we spent on the guest */
-	vtime_account_guest_exit();
-	instrumentation_end();
-}
-#endif
+/* guest_enter_irqoff() / guest_exit_irqoff() are provided by compat.h. */
 
 /**
  * copy from tracehook_notify_resume defined in linux/tracehook.h
@@ -600,7 +577,7 @@ static void vmx_save_host_state(struct vmx_vcpu *vcpu)
 	}
 }
 
-static __init int adjust_vmx_controls(u32 ctl_min, u32 ctl_opt,
+static int adjust_vmx_controls(u32 ctl_min, u32 ctl_opt,
 				      u32 msr, u32 *result)
 {
 	u32 vmx_msr_low, vmx_msr_high;
@@ -619,7 +596,7 @@ static __init int adjust_vmx_controls(u32 ctl_min, u32 ctl_opt,
 	return 0;
 }
 
-static __init int setup_vmcs_config(struct vmcs_config *vmcs_conf)
+static int setup_vmcs_config(struct vmcs_config *vmcs_conf)
 {
 	u32 vmx_msr_low, vmx_msr_high;
 	u32 min, opt, min2, opt2;
@@ -823,14 +800,14 @@ static void __vmx_get_cpu_helper(void *ptr)
 
 	WARN_ON(raw_smp_processor_id() != vcpu->cpu);
 	vmcs_clear(vcpu->vmcs);
-	if (__this_cpu_read(local_vcpu) == vcpu)
-		this_cpu_write(local_vcpu, NULL);
+	if (__this_cpu_read(vmx_local_vcpu) == vcpu)
+		this_cpu_write(vmx_local_vcpu, NULL);
 }
 
 static void __load_vcpu(struct vmx_vcpu *vcpu, int cpu)
 {
-	if (__this_cpu_read(local_vcpu) != vcpu) {
-		this_cpu_write(local_vcpu, vcpu);
+	if (__this_cpu_read(vmx_local_vcpu) != vcpu) {
+		this_cpu_write(vmx_local_vcpu, vcpu);
 
 		if (vcpu->cpu != cpu) {
 			unsigned long sysenter_esp;
@@ -1627,7 +1604,7 @@ static void vmx_copy_status_to_conf(struct vmx_vcpu *vcpu,
  * Returns: A new VCPU structure
  */
 struct vmx_vcpu *vmx_create_vcpu(struct slimvm_config *conf,
-				struct instance *instp)
+				struct instance *instp, int vcpu_no)
 {
 	struct vmx_vcpu *vcpu;
 	struct desc_ptr dt;
@@ -1636,6 +1613,8 @@ struct vmx_vcpu *vmx_create_vcpu(struct slimvm_config *conf,
 	vcpu = kzalloc(sizeof(struct vmx_vcpu), GFP_KERNEL);
 	if (!vcpu)
 		return NULL;
+
+	vcpu->vcpu_no = vcpu_no;
 
 	vcpu->vmcs = vmx_alloc_vmcs();
 	if (!vcpu->vmcs)
@@ -1706,7 +1685,7 @@ void vmx_destroy_vcpu(struct vmx_vcpu *vcpu)
 	vmx_get_cpu(vcpu);
 	ept_sync_context(vcpu->instance->eptp);
 	vmcs_clear(vcpu->vmcs);
-	this_cpu_write(local_vcpu, NULL);
+	this_cpu_write(vmx_local_vcpu, NULL);
 	vmx_put_cpu(vcpu);
 	vmx_free_vpid(vcpu);
 	vmx_free_vmcs(vcpu->vmcs);
@@ -2516,13 +2495,14 @@ static inline void vmx_process_vcpu_requests(struct vmx_vcpu *vcpu)
 
 #define HIGHER_HALF_CANONICAL_ADDR 0xFFFF800000000000
 
-void (*fn_do_nmi)(struct pt_regs *);
+/* Shared by both engines; resolved from exc_nmi at hardware enable time. */
+void (*fn_do_nmi)(struct pt_regs *) __read_mostly;
 
 static inline void vmx_handle_nmi(struct vmx_vcpu *vcpu)
 {
 	struct pt_regs regs;
 
-	this_cpu_write(local_vcpu, vcpu);
+	this_cpu_write(vmx_local_vcpu, vcpu);
 	vcpu->flags = vmcs_readl(GUEST_RFLAGS);
 	if (vcpu->flags & X86_EFLAGS_IF)
 		asm("int $2");
@@ -2542,7 +2522,7 @@ static inline void vmx_handle_nmi(struct vmx_vcpu *vcpu)
 
 		fn_do_nmi(&regs);
 	}
-	this_cpu_write(local_vcpu, NULL);
+	this_cpu_write(vmx_local_vcpu, NULL);
 }
 
 
@@ -2568,7 +2548,7 @@ int vmx_launch(struct vmx_vcpu *vcpu, struct slimvm_config *conf)
 		preempt_disable();
 
 		/*
-		 * * __NR_clone syscalls may change local_vcpu, load
+		 * * __NR_clone syscalls may change vmx_local_vcpu, load
 		 * vcpu again if changed.
 		 */
 		__load_vcpu(vcpu, raw_smp_processor_id());
@@ -2701,7 +2681,7 @@ int vmx_launch(struct vmx_vcpu *vcpu, struct slimvm_config *conf)
 		switch (reason) {
 		case EXIT_REASON_VMCALL:
 			if (likely(!vmx_get_cpl(vcpu))) {
-				if (!do_seccomp_filter(vcpu)) {
+				if (!do_seccomp_filter(vcpu->regs)) {
 					vmx_handle_syscall(vcpu);
 				} else {
 					done = 1;
@@ -2797,7 +2777,7 @@ int vmx_launch(struct vmx_vcpu *vcpu, struct slimvm_config *conf)
  * __vmx_enable - low-level enable of VMX mode on the current CPU
  * @vmxon_buf: an opaque buffer for use as the VMXON region
  */
-static __init int __vmx_enable(struct vmcs *vmxon_buf)
+static int __vmx_enable(struct vmcs *vmxon_buf)
 {
 	u64 phys_addr = __pa(vmxon_buf);
 	u64 old, test_bits;
@@ -2829,7 +2809,7 @@ static __init int __vmx_enable(struct vmcs *vmxon_buf)
  *
  * Sets up necessary state for enable (e.g. a scratchpad for VMXON.)
  */
-static __init void vmx_enable(void *unused)
+static void vmx_enable(void *unused)
 {
 	int ret;
 	struct vmcs *vmxon_buf = __this_cpu_read(vmxarea);
@@ -2875,11 +2855,17 @@ static void vmx_free_vmxon_areas(void)
 }
 
 /**
- * vmx_init - the main initialization routine for this driver
+ * vmx_hardware_enable_all - the main initialization routine for the VMX engine
  */
-__init int vmx_init(void)
+int vmx_hardware_enable_all(void)
 {
 	int r, cpu;
+
+	fn_do_nmi = (void *) kln_hack("exc_nmi");
+	if (!fn_do_nmi) {
+		slimvm_error("failed to get exc_nmi\n");
+		return -EINVAL;
+	}
 
 	slimvm_get_cpu_feature();
 
@@ -2944,11 +2930,62 @@ failed1:
 }
 
 /**
- * vmx_exit - the main removal routine for this driver
+ * vmx_hardware_disable_all - the main removal routine for the VMX engine
  */
-void vmx_exit(void)
+void vmx_hardware_disable_all(void)
 {
 	on_each_cpu(vmx_disable, NULL, 1);
 	vmx_free_vmxon_areas();
 	free_page((unsigned long)msr_bitmap);
 }
+
+/* ---- vendor ops adapters: cast the opaque handle back to vmx_vcpu ---- */
+
+static struct slimvm_vcpu *vmx_ops_create_vcpu(struct slimvm_config *conf,
+					       struct instance *instp,
+					       int vcpu_no)
+{
+	return (struct slimvm_vcpu *)vmx_create_vcpu(conf, instp, vcpu_no);
+}
+
+static void vmx_ops_destroy_vcpu(struct slimvm_vcpu *vcpu)
+{
+	vmx_destroy_vcpu((struct vmx_vcpu *)vcpu);
+}
+
+static int vmx_ops_launch(struct slimvm_vcpu *vcpu, struct slimvm_config *conf)
+{
+	return vmx_launch((struct vmx_vcpu *)vcpu, conf);
+}
+
+static void vmx_ops_set_vcpu_mode(struct slimvm_vcpu *vcpu, u8 mode)
+{
+	vmx_set_vcpu_mode((struct vmx_vcpu *)vcpu, mode);
+}
+
+static bool vmx_ops_vcpu_is_shutdown(struct slimvm_vcpu *vcpu)
+{
+	return ((struct vmx_vcpu *)vcpu)->shutdown;
+}
+
+static void vmx_ops_make_nmi_request(struct slimvm_vcpu *vcpu)
+{
+	vmx_make_request(VMX_REQ_NMI, (struct vmx_vcpu *)vcpu);
+}
+
+struct slimvm_engine_ops vmx_ops = {
+	.name			= "vmx",
+	.hardware_enable_all	= vmx_hardware_enable_all,
+	.hardware_disable_all	= vmx_hardware_disable_all,
+	.create_vcpu		= vmx_ops_create_vcpu,
+	.destroy_vcpu		= vmx_ops_destroy_vcpu,
+	.launch			= vmx_ops_launch,
+	.set_vcpu_mode		= vmx_ops_set_vcpu_mode,
+	.vcpu_is_shutdown	= vmx_ops_vcpu_is_shutdown,
+	.make_nmi_request	= vmx_ops_make_nmi_request,
+	.shutdown_all_vcpus	= vmx_shutdown_all_vcpus,
+	.sync_all_vcpus		= vmx_sync_all_vcpus,
+	.instance_alloc_ptp	= instance_alloc_eptp,
+	.instance_init_pt	= instance_init_ept,
+	.instance_destroy_pt	= instance_destroy_ept,
+};

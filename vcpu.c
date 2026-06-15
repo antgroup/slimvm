@@ -7,7 +7,7 @@
 
 #include <linux/sched.h>
 #include "instance.h"
-#include "vmx.h"
+#include "engine.h"
 
 static inline int vcpu_allocate_vcpu_no(struct instance *instp)
 {
@@ -37,7 +37,7 @@ static inline void vcpu_free_vcpu_no(struct instance *instp, int vcpu_no)
 
 int vcpu_alloc(struct instance *instp, struct slimvm_config *conf)
 {
-	struct vmx_vcpu		*vcpu;
+	struct slimvm_vcpu	*vcpu;
 	int			vcpu_no;
 
 	vcpu_no = vcpu_allocate_vcpu_no(instp);
@@ -46,13 +46,12 @@ int vcpu_alloc(struct instance *instp, struct slimvm_config *conf)
 		return -ENOMEM;
 	}
 
-	vcpu = vmx_create_vcpu(conf, instp);
+	vcpu = slimvm_ops->create_vcpu(conf, instp, vcpu_no);
 	if (!vcpu) {
 		vcpu_free_vcpu_no(instp, vcpu_no);
 		return -ENOMEM;
 	}
 
-	vcpu->vcpu_no = vcpu_no;
 	if (!cmpxchg(&instp->mm, NULL, current->mm))
 		atomic_inc(&current->mm->mm_count);
 
@@ -65,7 +64,7 @@ int vcpu_alloc(struct instance *instp, struct slimvm_config *conf)
 
 void vcpu_release(struct instance *instp, int vcpu_no)
 {
-	struct vmx_vcpu	*vcpu;
+	struct slimvm_vcpu	*vcpu;
 
 	spin_lock(&instp->vcpu_lock);
 	if (!instp->vcpus[vcpu_no]) {
@@ -78,12 +77,12 @@ void vcpu_release(struct instance *instp, int vcpu_no)
 	instp->vcpus[vcpu_no] = NULL;
 	spin_unlock(&instp->vcpu_lock);
 
-	vmx_destroy_vcpu(vcpu);
+	slimvm_ops->destroy_vcpu(vcpu);
 }
 
 void vcpu_inject_nmi(struct instance *instp, int vcpu_no)
 {
-	struct vmx_vcpu	*vcpu;
+	struct slimvm_vcpu	*vcpu;
 
 	spin_lock(&instp->vcpu_lock);
 	if (!instp->vcpus[vcpu_no]) {
@@ -91,6 +90,6 @@ void vcpu_inject_nmi(struct instance *instp, int vcpu_no)
 		return;
 	}
 	vcpu = instp->vcpus[vcpu_no];
-	vmx_make_request(VMX_REQ_NMI, vcpu);
+	slimvm_ops->make_nmi_request(vcpu);
 	spin_unlock(&instp->vcpu_lock);
 }

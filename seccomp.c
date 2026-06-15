@@ -13,6 +13,7 @@
 #include <linux/bpf.h>
 
 #include "seccomp.h"
+#include "slimvm.h"
 #include "compat.h"
 
 #ifdef CONFIG_SECCOMP_FILTER
@@ -135,7 +136,7 @@ struct seccomp_filter {
 #endif
 
 /* do_seccomp_filter - evaluates all seccomp filters against vmcall. */
-int do_seccomp_filter(struct vmx_vcpu *vcpu)
+int do_seccomp_filter(u64 *regs)
 {
 #ifdef CONFIG_SECCOMP_FILTER
 	struct seccomp_filter *f;
@@ -166,19 +167,19 @@ int do_seccomp_filter(struct vmx_vcpu *vcpu)
 	 *
 	 * __NR_restart_syscall may be reset during HR0 syscall.
 	 */
-	sd.nr = vcpu->regs[VCPU_REGS_RAX];
+	sd.nr = regs[VCPU_REGS_RAX];
 	if (unlikely(sd.nr >= NR_syscalls ||
 		     sd.nr == __NR_restart_syscall))
 		return 0;
 
-	sd.instruction_pointer = vcpu->regs[VCPU_REGS_RIP];
+	sd.instruction_pointer = regs[VCPU_REGS_RIP];
 	sd.arch = syscall_get_arch(current);
-	sd.args[0] = vcpu->regs[VCPU_REGS_RDI];
-	sd.args[1] = vcpu->regs[VCPU_REGS_RSI];
-	sd.args[2] = vcpu->regs[VCPU_REGS_RDX];
-	sd.args[3] = vcpu->regs[VCPU_REGS_R10];
-	sd.args[4] = vcpu->regs[VCPU_REGS_R8];
-	sd.args[5] = vcpu->regs[VCPU_REGS_R9];
+	sd.args[0] = regs[VCPU_REGS_RDI];
+	sd.args[1] = regs[VCPU_REGS_RSI];
+	sd.args[2] = regs[VCPU_REGS_RDX];
+	sd.args[3] = regs[VCPU_REGS_R10];
+	sd.args[4] = regs[VCPU_REGS_R8];
+	sd.args[5] = regs[VCPU_REGS_R9];
 
 	/*
 	 * All filters in the list are evaluated and the lowest BPF return
@@ -208,7 +209,7 @@ int do_seccomp_filter(struct vmx_vcpu *vcpu)
 	 */
 	switch (ret) {
 	case SECCOMP_RET_ERRNO:
-		vcpu->regs[VCPU_REGS_RAX] = NR_syscalls;
+		regs[VCPU_REGS_RAX] = NR_syscalls;
 #if LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0)
 		fallthrough;
 #endif

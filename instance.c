@@ -20,7 +20,7 @@
 #include "slimvm.h"
 #include "instance.h"
 #include "proc.h"
-#include "vmx.h"
+#include "engine.h"
 #include "mm.h"
 #include "compat.h"
 
@@ -125,9 +125,8 @@ struct instance *instance_create(void)
 	instp->mmu_notifier_seq = 0;
 	instp->mmu_notifier_count = 0;
 
-	if (instance_alloc_eptp(instp))
+	if (slimvm_ops->instance_alloc_ptp(instp))
 		goto id_err;
-
 	preempt_notifier_inc();
 
 	return instp;
@@ -147,19 +146,19 @@ int instance_release(struct instance *instp)
 {
 	int vcpu;
 
-	vmx_shutdown_all_vcpus(instp);
+	slimvm_ops->shutdown_all_vcpus(instp);
 
 	/*
 	 * Calling this for leaked instance results in busy loop
 	 * and never returns.
 	 */
 	if (!instp->force_release)
-		vmx_sync_all_vcpus(instp);
+		slimvm_ops->sync_all_vcpus(instp);
 
 	for_each_set_bit(vcpu, instp->vcpu_bitmap, VM_MAX_VCPUS)
 		vcpu_release(instp, vcpu);
 
-	instance_destroy_ept(instp);
+	slimvm_ops->instance_destroy_pt(instp);
 
 	/*
 	 * instp->mm will only be initialized when creating vcpu,
@@ -229,7 +228,7 @@ void slimvm_reclaim_leaked_instances(void)
 	}
 }
 
-struct vmx_vcpu *instance_get_vcpu(struct instance *instp, int vcpu_no)
+void *instance_get_vcpu(struct instance *instp, int vcpu_no)
 {
 	if (unlikely(vcpu_no < 0 || vcpu_no >= VM_MAX_VCPUS))
 		return NULL;

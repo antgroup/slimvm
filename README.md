@@ -3,7 +3,8 @@
 ## What is SlimVM?
 
 SlimVM is a Linux kernel module specifically designed for [gVisor][gvisor] to
-provide hardware virtualization capabilities using Intel VT-x (VMX).
+provide hardware virtualization capabilities using Intel VT-x (VMX) and
+AMD/Hygon SVM.
 
 SlimVM is implemented based on [DUNE][dune].
 
@@ -23,39 +24,50 @@ gr0 (guest ring 0) -> hr0 (host ring 0, vm_exit)
                    -> hr0 (re-invoke syscall)
 ```
 
-SlimVM eliminates this overhead. When the guest executes a `VMCALL`, the VM exits
-into VMX root mode where SlimVM directly invokes the host kernel's syscall handler,
-then immediately resumes the guest — no userspace round-trip:
+SlimVM eliminates this overhead. When the guest executes a `VMCALL` (Intel) or
+`VMMCALL` (AMD/Hygon), the VM exits into root mode where SlimVM directly invokes
+the host kernel's syscall handler, then immediately resumes the guest — no
+userspace round-trip:
 
 ```
-gr0 (guest ring 0) -> hr0 (vmcall + direct function call)
+gr0 (guest ring 0) -> hr0 (vmcall/vmmcall + direct function call)
 ```
 
 This eliminates expensive context switches between user space and kernel space.
 
 ## Features
 
-- **Hardware Virtualization**: Leverages Intel VT-x (VMX) and EPT (Extended Page Tables)
-- **System Call Interception**: Intercepts and handles syscalls via `vmcall` instructions
-- **Memory Isolation**: Uses EPT for guest physical to host physical address translation
+- **Hardware Virtualization**: Leverages Intel VT-x (VMX/EPT) and AMD/Hygon SVM (NPT)
+- **System Call Interception**: Intercepts and handles syscalls via `vmcall`/`vmmcall` instructions
+- **Memory Isolation**: Uses EPT (Intel) / NPT (AMD) for guest physical to host physical address translation
 - **Seccomp Integration**: Supports seccomp-BPF filters for syscall filtering
 - **Multi-Version Support**: Supports Linux kernels 5.10.y, 5.15.y, and 6.1.y
 
 ## Architecture Support
 
-| Architecture   | Status    |
-| -------------- | --------- |
-| x86_64 (Intel) | Supported |
-| AMD            | Planned   |
-| ARM            | Planned   |
+| Architecture           | Status    |
+| ---------------------- | --------- |
+| x86_64 (Intel VMX)     | Supported |
+| x86_64 (AMD/Hygon SVM) | Supported |
+| ARM                    | Planned   |
+
+SlimVM is built as a single self-contained module that links both the Intel
+(VMX) and AMD/Hygon (SVM) engines. At load time it detects the CPU vendor and
+binds the matching engine through a vendor operations table
+(`struct slimvm_engine_ops`), mirroring how Linux KVM shares a common core
+between `kvm-intel.ko` and `kvm-amd.ko`.
 
 ## Module Conflict
 
 **Notice**: SlimVM conflicts with the `kvm` module because both require exclusive
-access to Intel VT-x hardware. You must remove `kvm` before using SlimVM:
+access to the CPU virtualization hardware. You must remove `kvm` before using
+SlimVM:
 
 ```sh
+# Intel
 sudo rmmod kvm_intel kvm
+# AMD / Hygon
+sudo rmmod kvm_amd kvm
 ```
 
 ## Installing from Source
@@ -144,7 +156,7 @@ SlimVM exposes runtime information via sysctl and procfs:
 | `/proc/sys/slimvm/slimvm_vcpu_num`     | read-only  | Total vCPU count across all instances |
 | `/proc/sys/slimvm/slimvm_vm_num`       | read-only  | Total VM instance count               |
 | `/proc/sys/slimvm/slimvm_debug_enable` | read-write | Toggle runtime debug logging          |
-| `/proc/slimvm/vm_mem_stat`             | read-only  | Per-instance EPT memory statistics    |
+| `/proc/slimvm/vm_mem_stat`             | read-only  | Per-instance nested-PT (EPT/NPT) memory statistics |
 
 Example:
 ```sh

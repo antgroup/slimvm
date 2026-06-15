@@ -14,15 +14,10 @@
 #include <linux/kvm_types.h>
 #include <linux/version.h>
 
+#include "engine.h"
 #include "instance.h"
 #include "vmcs.h"
 
-#define ENTER_UESTMODE_FLAGS \
-	(_TIF_NOTIFY_RESUME | \
-	 _TIF_SIGPENDING | \
-	 _TIF_NEED_RESCHED)
-
-DECLARE_PER_CPU(struct vmx_vcpu *, local_vcpu);
 
 struct vmx_capability {
 	u64 pin_based;
@@ -33,54 +28,6 @@ struct vmx_capability {
 };
 
 extern struct vmx_capability vmx_capability;
-
-enum vmx_reg {
-	VCPU_REGS_RAX = 0,
-	VCPU_REGS_RCX = 1,
-	VCPU_REGS_RDX = 2,
-	VCPU_REGS_RBX = 3,
-	VCPU_REGS_RSP = 4,
-	VCPU_REGS_RBP = 5,
-	VCPU_REGS_RSI = 6,
-	VCPU_REGS_RDI = 7,
-#ifdef CONFIG_X86_64
-	VCPU_REGS_R8 = 8,
-	VCPU_REGS_R9 = 9,
-	VCPU_REGS_R10 = 10,
-	VCPU_REGS_R11 = 11,
-	VCPU_REGS_R12 = 12,
-	VCPU_REGS_R13 = 13,
-	VCPU_REGS_R14 = 14,
-	VCPU_REGS_R15 = 15,
-#endif
-	VCPU_REGS_RIP,
-	NR_VCPU_REGS
-};
-
-enum {
-	VCPU_SREG_ES,
-	VCPU_SREG_CS,
-	VCPU_SREG_SS,
-	VCPU_SREG_DS,
-	VCPU_SREG_FS,
-	VCPU_SREG_GS,
-	VCPU_SREG_TR,
-	VCPU_SREG_LDTR,
-};
-
-enum {
-	OUTSIDE_ROOT_MODE,
-	IN_ROOT_MODE,
-	OUTSIDE_GUEST_MODE,
-	IN_GUEST_MODE,
-	EXITING_GUEST_MODE,
-};
-
-struct msr_entry {
-	u32 index;
-	u32 reserved;
-	u64 data;
-};
 
 struct vmx_vcpu {
 	struct list_head list;
@@ -153,24 +100,23 @@ struct vmx_vcpu {
 };
 
 /*
- * Copied from KVM.
- * Architecture-independent vcpu->requests bit members
- * Bits 4-7 are reserved for more arch-independent bits.
+ * VMX request aliases over the shared SLIMVM_REQ_* bits (see engine.h).
+ * Kept for readability of the VMX-internal call sites.
  */
-#define VMX_REQ_TLB_FLUSH	0
-#define VMX_REQ_MMU_RELOAD	1
-#define VMX_REQ_PENDING_TIMER	2
-#define VMX_REQ_UNHALT		3
-/* x86-specific vcpu->requests bit members */
-#define VMX_REQ_NMI               17
+#define VMX_REQ_TLB_FLUSH	SLIMVM_REQ_TLB_FLUSH
+#define VMX_REQ_MMU_RELOAD	SLIMVM_REQ_MMU_RELOAD
+#define VMX_REQ_PENDING_TIMER	SLIMVM_REQ_PENDING_TIMER
+#define VMX_REQ_UNHALT		SLIMVM_REQ_UNHALT
+#define VMX_REQ_NMI		SLIMVM_REQ_NMI
 
-extern __init int vmx_init(void);
-extern void vmx_exit(void);
+extern int vmx_hardware_enable_all(void);
+extern void vmx_hardware_disable_all(void);
 extern void vmx_cleanup(void);
 
 extern int vmx_launch(struct vmx_vcpu *vcpu, struct slimvm_config *conf);
 
-extern struct vmx_vcpu *vmx_create_vcpu(struct slimvm_config *conf, struct instance *instp);
+extern struct vmx_vcpu *vmx_create_vcpu(struct slimvm_config *conf,
+					struct instance *instp, int vcpu_no);
 extern void vmx_destroy_vcpu(struct vmx_vcpu *vcpu);
 extern void vmx_shutdown_all_vcpus(struct instance *instp);
 extern void vmx_sync_all_vcpus(struct instance *instp);
@@ -190,6 +136,13 @@ extern void vmx_set_vcpu_mode(struct vmx_vcpu *vcpu, u8 mode);
 extern bool vmx_check_vcpu_mode(struct vmx_vcpu *vcpu, u8 mode);
 
 extern void make_pt_regs(struct vmx_vcpu *vcpu, struct pt_regs *regs, int sysnr);
+
+/* Exception handling entry points (exception.c). */
+int slimvm_signal_handler(struct vmx_vcpu *vcpu);
+int slimvm_exception_handler(u32 intr_info, struct vmx_vcpu *vcpu);
+void slimvm_inject_vector(struct vmx_vcpu *vcpu, u64 vector);
+void slimvm_inject_nmi(struct vmx_vcpu *vcpu);
+void exceptions_restore_guest_regs(struct vmx_vcpu *vcpu);
 
 extern void (*fn_do_nmi)(struct pt_regs *);
 

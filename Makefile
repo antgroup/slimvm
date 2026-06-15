@@ -15,6 +15,11 @@ ifeq ($(DEBUG),y)
 	EXTRA_CFLAGS += -DDEBUG
 endif
 
+# Build the AMD SVM engine alongside the Intel VMX engine. Both engines are
+# linked into the single self-contained module; the matching one is bound at
+# load time based on the CPU vendor.
+EXTRA_CFLAGS += -DSLIMVM_HAVE_SVM
+
 obj-m := slimvm.o
 slimvm-objs := \
 	vmx.o \
@@ -26,7 +31,10 @@ slimvm-objs := \
 	vmcs.o \
 	exception.o \
 	seccomp.o \
-	proc.o
+	proc.o \
+	svm.o \
+	npt.o \
+	exception_svm.o
 list-m := slimvm
 
 # KSRC should be set to the path to your sources

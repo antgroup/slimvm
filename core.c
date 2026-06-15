@@ -16,11 +16,14 @@
 
 #include <linux/miscdevice.h>
 #include <linux/kprobes.h>
+#include <linux/version.h>
 
-#include "vmx.h"
+#include "engine.h"
 #include "slimvm.h"
+#include "instance.h"
 #include "mm.h"
 #include "proc.h"
+#include "compat.h"
 
 #if !(LINUX_VERSION_CODE >= KERNEL_VERSION(5, 10, 0) && LINUX_VERSION_CODE < KERNEL_VERSION(5, 11, 0)) \
 	&& !(LINUX_VERSION_CODE >= KERNEL_VERSION(5, 15, 0) && LINUX_VERSION_CODE < KERNEL_VERSION(5, 16, 0)) \
@@ -31,11 +34,14 @@
 MODULE_LICENSE("GPL");
 MODULE_DESCRIPTION("A driver for SlimVM");
 
+/* The virtualization engine bound at module load (see slimvm_engine_init). */
+struct slimvm_engine_ops *slimvm_ops;
+
 #define KPROBE_PRE_HANDLER(fname) static int __kprobes fname(struct kprobe *p, struct pt_regs *regs)
 
 static int slimvm_enter(struct slimvm_config *conf, struct instance *instp)
 {
-	struct vmx_vcpu *vcpu = NULL;
+	struct slimvm_vcpu *vcpu = NULL;
 	int vcpu_no = conf->vcpu;
 
 	if (unlikely(vcpu_no < 0 || vcpu_no >= VM_MAX_VCPUS))
@@ -49,15 +55,15 @@ static int slimvm_enter(struct slimvm_config *conf, struct instance *instp)
 	}
 
 	vcpu = instp->vcpus[vcpu_no];
-	if (!vcpu || vcpu->shutdown) {
+	if (!vcpu || slimvm_ops->vcpu_is_shutdown(vcpu)) {
 		spin_unlock(&instp->vcpu_lock);
 		return -1;
 	}
 
-	vmx_set_vcpu_mode(vcpu, IN_ROOT_MODE);
+	slimvm_ops->set_vcpu_mode(vcpu, IN_ROOT_MODE);
 	spin_unlock(&instp->vcpu_lock);
 
-	return vmx_launch(vcpu, conf);
+	return slimvm_ops->launch(vcpu, conf);
 }
 
 static long slimvm_dev_ioctl(struct file *filp,
@@ -167,7 +173,7 @@ static long slimvm_dev_ioctl(struct file *filp,
 		instp->mem_region_num = conf.mem_region_num;
 		instp->sid = conf.sid;
 
-		r = instance_init_ept(instp);
+		r = slimvm_ops->instance_init_pt(instp);
 		if (r) {
 			mutex_unlock(&instp->mm_mutex);
 			goto out;
@@ -305,26 +311,53 @@ static int m_init(void)
 	return 0;
 }
 
+/*
+ * slimvm_engine_init - bind slimvm_ops to the engine matching the running
+ * CPU vendor, then enable it on all CPUs.
+ */
+int slimvm_engine_init(void)
+{
+	switch (boot_cpu_data.x86_vendor) {
+	case X86_VENDOR_INTEL:
+		slimvm_ops = &vmx_ops;
+		break;
+#ifdef SLIMVM_HAVE_SVM
+	case X86_VENDOR_AMD:
+	case X86_VENDOR_HYGON:
+		slimvm_ops = &svm_ops;
+		break;
+#endif
+	default:
+		slimvm_error("unsupported CPU vendor %d\n",
+			     boot_cpu_data.x86_vendor);
+		return -EIO;
+	}
+
+	slimvm_info("using %s engine\n", slimvm_ops->name);
+
+	return slimvm_ops->hardware_enable_all();
+}
+
+void slimvm_engine_exit(void)
+{
+	if (slimvm_ops)
+		slimvm_ops->hardware_disable_all();
+}
+
 static int __init slimvm_init(void)
 {
 	int r;
 
 	m_init();
 
-	fn_do_nmi = (void *) kln_hack("exc_nmi");
-	if (!fn_do_nmi) {
-		slimvm_error("failed to get do_nmi\n");
-		return -EINVAL;
-	}
-
 	if (!slimvm_sysctl_init()) {
 		slimvm_error("proc sysctl initializing failed!\n");
 		return -1;
 	}
 
-	r = vmx_init();
+	r = slimvm_engine_init();
 	if (r) {
-		slimvm_error("failed to initialize vmx\n");
+		slimvm_error("failed to initialize virtualization engine\n");
 		slimvm_sysctl_exit();
 		return r;
 	}
@@ -332,7 +365,7 @@ static int __init slimvm_init(void)
 	r = misc_register(&slimvm_dev);
 	if (r) {
 		slimvm_error("misc device register failed\n");
-		vmx_exit();
+		slimvm_engine_exit();
 		slimvm_sysctl_exit();
 		return r;
 	}
@@ -347,7 +380,7 @@ static void __exit slimvm_exit(void)
 	slimvm_sysctl_exit();
 
 	misc_deregister(&slimvm_dev);
-	vmx_exit();
+	slimvm_engine_exit();
 	slimvm_info("module slimvm removed\n");
 }
 

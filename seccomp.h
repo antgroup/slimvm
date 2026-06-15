@@ -5,7 +5,8 @@
 
 #ifndef _SLIMVM_SECCOMP_H_
 #define _SLIMVM_SECCOMP_H_
-#include "vmx.h"
+#include <linux/types.h>
+#include "engine.h"
 
-int do_seccomp_filter(struct vmx_vcpu *vcpu);
+int do_seccomp_filter(u64 *regs);
 #endif

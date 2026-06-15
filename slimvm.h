@@ -107,6 +107,8 @@ struct slimvm_config {
 
 #define SLIMVM_RET_EXIT 0x80
 #define SLIMVM_RET_EPT_VIOLATION 0x81
+/* AMD NPT uses the same exit-reason code as Intel EPT. */
+#define SLIMVM_RET_NPT_VIOLATION SLIMVM_RET_EPT_VIOLATION
 #define SLIMVM_RET_UNHANDLED_VMEXIT 0x82
 #define SLIMVM_RET_NOENTER 0x83
 
